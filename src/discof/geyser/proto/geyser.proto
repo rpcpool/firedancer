@@ -10,10 +10,10 @@ package geyser;
    src/discof/geyser/fd_geyser_tile.c encodes by hand with fd_pb_encode.h;
    it is a reference and is NOT run through protoc by the build.
 
-   v1 (this file) implements only the slot + ping/pong path.  Account,
-   transaction, block, blocks_meta and entry updates are intentionally
-   omitted until later phases; their field numbers are reserved here so the
-   oneof tags stay compatible when they land. */
+   This file covers what the tile serves: slot updates, account updates
+   and ping/pong.  Transaction, block, blocks_meta and entry updates are
+   not implemented; their field numbers stay free so the oneof tags
+   remain compatible when they land. */
 
 service Geyser {
   rpc Subscribe( stream SubscribeRequest ) returns ( stream SubscribeUpdate );
@@ -43,7 +43,7 @@ enum SlotStatus {
 }
 
 message SubscribeRequest {
-  map<string, SubscribeRequestFilterAccounts> accounts     = 1; /* reserved (v2) */
+  map<string, SubscribeRequestFilterAccounts> accounts     = 1;
   map<string, SubscribeRequestFilterSlots>    slots        = 2;
   CommitmentLevel                             commitment   = 6;
   SubscribeRequestPing                        ping         = 9;
@@ -51,8 +51,8 @@ message SubscribeRequest {
 }
 
 message SubscribeRequestFilterAccounts {
-  repeated string account = 2; /* reserved (v2) */
-  repeated string owner   = 3; /* reserved (v2) */
+  repeated string account = 2; /* base58 */
+  repeated string owner   = 3; /* base58 */
 }
 
 message SubscribeRequestFilterSlots {
@@ -87,7 +87,6 @@ message SubscribeUpdateSlot {
   optional string dead_error = 4;
 }
 
-/* Reserved for v2 (account streaming); fields documented for reference. */
 message SubscribeUpdateAccount {
   SubscribeUpdateAccountInfo account    = 1;
   uint64                     slot       = 2;
