@@ -1967,6 +1967,42 @@ telemetry = true
         # loading.
         delay_startup = true
 
+    [tiles.geyser]
+        # If the Yellowstone-compatible Geyser gRPC server is enabled.
+        # When enabled, a stock Yellowstone gRPC client can connect to
+        # the listen address and open the geyser.Geyser/Subscribe
+        # stream.  It serves slot and account updates.
+        #
+        # This is an experimental, plaintext server with no TLS and no
+        # authentication, intended for trusted local consumers.  Do not
+        # expose it to untrusted networks.
+        enabled = false
+
+        # The IPv4 address to listen on.  By default, if enabled, the
+        # Geyser server is only accessible from the local machine.
+        listen_address = "127.0.0.1"
+
+        # The TCP port to listen on for gRPC (HTTP/2) connections.
+        listen_port = 10000
+
+        # The maximum number of concurrent gRPC connections.  Each
+        # connection has its own outbound ring sized to hold a fully
+        # reassembled max-size account update (10 MiB), so this trades
+        # directly against memory (about 10.5 MiB per connection, about
+        # 700 MiB at the default).  A fronting proxy such as Envoy pools
+        # upstream connections per worker thread, so this must exceed
+        # the proxy's worker count.  Idle connections without a
+        # subscription are closed after 60 seconds, and the longest-idle
+        # one is evicted when at capacity.
+        max_connections = 64
+
+        # All subscriber connections share buffer space for outgoing
+        # update messages.  If a connection's buffer runs out (a slow
+        # consumer), that connection is dropped rather than stalling the
+        # validator.  Larger values tolerate slower clients at the cost
+        # of memory usage.
+        send_buffer_size_mb = 64
+
 # These options can be useful for development, but should not be used
 # when connecting to a live cluster, as they may cause the validator to
 # be unstable or have degraded performance or security.  The program

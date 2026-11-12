@@ -12,7 +12,7 @@
    or knowingly skipped) before the constant is bumped.  String keys of
    the user's own file are separately forced through the classification
    lists below. */
-FD_STATIC_ASSERT( sizeof(fd_config_t)==26563824UL, update_fd_config_to_json_for_the_layout_change );
+FD_STATIC_ASSERT( sizeof(fd_config_t)==26563864UL, update_fd_config_to_json_for_the_layout_change );
 
 #define REDACTED "[redacted]"
 
@@ -133,6 +133,7 @@ static char const * const jw_redacted_keys[] = {
   "gossip.entrypoints",
   "tiles.gui.gui_listen_address",
   "tiles.rpc.rpc_listen_address",
+  "tiles.geyser.listen_address",
   "development.bundle.ssl_key_log_file",
   "development.ledger_input.path",
   "capture.dump_proto_dir",
@@ -616,6 +617,13 @@ fd_config_to_json( fd_config_t const * config,
       jw_ulong( &w, "max_websocket_connections", config->tiles.rpc.max_websocket_connections );
       jw_ulong( &w, "send_buffer_size_mb",       config->tiles.rpc.send_buffer_size_mb );
       jw_bool ( &w, "delay_startup",             config->tiles.rpc.delay_startup );
+    jw_obj_close( &w );
+    jw_obj_open( &w, "geyser" );
+      jw_bool ( &w, "enabled",                   config->tiles.geyser.enabled );
+      jw_path ( &w, "listen_address",            config->tiles.geyser.listen_address );
+      jw_ulong( &w, "listen_port",               config->tiles.geyser.listen_port );
+      jw_ulong( &w, "max_connections",           config->tiles.geyser.max_connections );
+      jw_ulong( &w, "send_buffer_size_mb",       config->tiles.geyser.send_buffer_size_mb );
     jw_obj_close( &w );
     jw_obj_open( &w, "repair" );
       jw_ulong( &w, "repair_client_listen_port", config->tiles.repair.repair_client_listen_port );

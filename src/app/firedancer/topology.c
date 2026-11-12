@@ -281,6 +281,7 @@ fd_topo_initialize( config_t * config ) {
   int snapshots_enabled   = !!config->gossip.entrypoints_cnt;
   int snapmk_enabled      = !!snapzp_tile_cnt;
   int rpc_enabled         = config->tiles.rpc.enabled;
+  int geyser_enabled      = config->tiles.geyser.enabled;
   int telemetry_enabled   = config->telemetry && strcmp( config->tiles.event.url, "" );
   int leader_enabled      = !!config->firedancer.layout.enable_block_production;
   int rserve_enabled      = config->tiles.rserve.enabled;
@@ -547,6 +548,10 @@ fd_topo_initialize( config_t * config ) {
     FOR(resolv_tile_cnt)   fd_topob_link( topo, "resolv_pack",   "resolv_pack",   4096UL,                                   FD_TPU_RESOLVED_MTU,           1UL );
     /**/                   fd_topob_link( topo, "pack_poh",      "pack_poh",      4096UL,                                   sizeof(fd_done_packing_t),     1UL );
     FOR(execle_tile_cnt)   fd_topob_link( topo, "execle_poh",    "execle_poh",    4096UL,                                   FD_EXECLE_POH_MTU,             1UL );
+    if( FD_UNLIKELY( geyser_enabled && execle_tile_cnt ) ) {
+      fd_topob_wksp( topo, "execle_geyser" );
+      FOR(execle_tile_cnt) fd_topob_link( topo, "execle_geyser", "execle_geyser", 512UL,                                    USHORT_MAX,                    1UL );
+    }
     FOR(execle_tile_cnt)   fd_topob_link( topo, "pack_execle",   "pack_execle",   128UL,                                     FD_PACK_EXECLE_MTU,           1UL ); /* execle returns credits per frag, so this can be shallow enough for pack to keep in cache */
     if( FD_LIKELY( config->tiles.pack.use_consumed_cus ) ) {
       FOR(execle_tile_cnt) fd_topob_link( topo, "execle_pack",   "execle_pack",   1024UL,                                   FD_PACK_REBATE_MAX_SZ,         1UL );
@@ -584,6 +589,10 @@ fd_topo_initialize( config_t * config ) {
   }
 
   FOR(execrp_tile_cnt) fd_topob_link( topo, "execrp_replay", "execrp_replay", 16384UL,                                  sizeof(fd_execrp_task_done_msg_t), 1UL );
+  if( FD_UNLIKELY( geyser_enabled && execrp_tile_cnt ) ) {
+    fd_topob_wksp( topo, "execrp_geyser" );
+    FOR(execrp_tile_cnt) fd_topob_link( topo, "execrp_geyser", "execrp_geyser", 512UL,                                    USHORT_MAX,                        1UL );
+  }
   if( FD_LIKELY( config->tiles.gui.enabled ) ) {
     fd_topob_link( topo, "diag_gui", "diag_gui", 4UL, sizeof(fd_diag_system_resources_t), 1UL );
     /**/                 fd_topob_link( topo, "gossip_gui",  "gossip_gui",    256UL,                                    FD_GUI_GOSSIP_BW_MTU,          1UL );
@@ -679,6 +688,11 @@ fd_topo_initialize( config_t * config ) {
     fd_topob_wksp( topo, "rpc" );
     fd_topob_wksp( topo, "rpc_replay" );
     fd_topob_tile( topo, "rpc", "rpc", "metric_in", tile_to_cpu[ topo->tile_cnt ], 0, 1, 0, 1 );
+  }
+
+  if( FD_UNLIKELY( geyser_enabled ) ) {
+    fd_topob_wksp( topo, "geyser" );
+    fd_topob_tile( topo, "geyser", "geyser", "metric_in", tile_to_cpu[ topo->tile_cnt ], 0, 0, 0, 0 );
   }
 
   if( FD_UNLIKELY( solcap_enabled ) ) {
@@ -823,6 +837,9 @@ fd_topo_initialize( config_t * config ) {
 
   FOR(execrp_tile_cnt) fd_topob_tile_in (   topo, "execrp",  i,            "metric_in", "replay_execrp", i,            FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
   FOR(execrp_tile_cnt) fd_topob_tile_out(   topo, "execrp",  i,                         "execrp_replay", i                                                  );
+  if( FD_UNLIKELY( geyser_enabled ) ) {
+    FOR(execrp_tile_cnt) fd_topob_tile_out( topo, "execrp",  i,                         "execrp_geyser", i                                                  );
+  }
 
   if( !alpenglow_enabled ) {
   if(leader_enabled)  {fd_topob_tile_in (   topo, "tower",   0UL,          "metric_in", "dedup_resolv",  0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );}
@@ -876,6 +893,9 @@ fd_topo_initialize( config_t * config ) {
     }
     FOR(execle_tile_cnt) fd_topob_tile_in ( topo, "execle",  i,            "metric_in", "pack_execle",   i,            FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
     FOR(execle_tile_cnt) fd_topob_tile_out( topo, "execle",  i,                         "execle_poh",    i                                                  );
+    if( FD_UNLIKELY( geyser_enabled ) ) {
+      FOR(execle_tile_cnt) fd_topob_tile_out( topo, "execle", i,                        "execle_geyser", i                                                  );
+    }
     if( FD_LIKELY( config->tiles.pack.use_consumed_cus ) ) {
       FOR(execle_tile_cnt)fd_topob_tile_out(topo, "execle",  i,                         "execle_pack",   i                                                  );
     }
@@ -1021,6 +1041,16 @@ fd_topo_initialize( config_t * config ) {
       fd_topob_tile_in( topo, "rpc",  0UL, "metric_in", "tower_out",    0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
     }
     fd_topob_tile_in( topo, "rpc",    0UL, "metric_in", "replay_epoch", 0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
+  }
+
+  if( FD_UNLIKELY( geyser_enabled ) ) {
+    /* Unreliable: a slow geyser tile must never backpressure replay or
+       execution. */
+    /**/                 fd_topob_tile_in( topo, "geyser", 0UL, "metric_in", "replay_slot",   0UL, FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED );
+    FOR(execrp_tile_cnt) fd_topob_tile_in( topo, "geyser", 0UL, "metric_in", "execrp_geyser", i,   FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED );
+    if( leader_enabled ) {
+      FOR(execle_tile_cnt) fd_topob_tile_in( topo, "geyser", 0UL, "metric_in", "execle_geyser", i, FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED );
+    }
   }
 
   if( FD_UNLIKELY( solcap_enabled ) ) {
@@ -2037,6 +2067,17 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
     tile->gui.cache_size_gib         = config->firedancer.accounts.cache_size_gib;
     tile->gui.accdb_obj_id           = fd_pod_query_ulong( config->topo.props, "accdb", ULONG_MAX );
     FD_TEST( tile->gui.accdb_obj_id!=ULONG_MAX );
+
+  } else if( FD_UNLIKELY( !strcmp( tile->name, "geyser" ) ) ) {
+
+    if( FD_UNLIKELY( !fd_cstr_to_ip4_addr( config->tiles.geyser.listen_address, &tile->geyser.listen_addr ) ) )
+      FD_LOG_ERR(( "[tiles.geyser.listen_address] `%s` is not a valid IPv4 address", config->tiles.geyser.listen_address ));
+    if( FD_UNLIKELY( !config->tiles.geyser.max_connections ) )
+      FD_LOG_ERR(( "[tiles.geyser.max_connections] must be nonzero" ));
+    tile->geyser.listen_port         = config->tiles.geyser.listen_port;
+    tile->geyser.max_connections     = config->tiles.geyser.max_connections;
+    tile->geyser.send_buffer_size_mb = config->tiles.geyser.send_buffer_size_mb;
+    tile->geyser.alpenglow           = config->firedancer.consensus.alpenglow;
 
   } else if( FD_UNLIKELY( !strcmp( tile->name, "rpc" ) ) ) {
 

@@ -4134,6 +4134,6 @@ fd_metrics_sample_schema_t const fd_metrics_sample_tiles[] = {
   { NULL, 0U, NULL, 0UL, 0UL }
 };
 
-char const * const fd_metrics_sample_skip[] = { "backt", "bank", "benchs", "guih", "poh", "pohh", "repair", "resolh", "solcap", "store", "tower", "txsend", NULL };
+char const * const fd_metrics_sample_skip[] = { "backt", "bank", "benchs", "geyser", "guih", "poh", "pohh", "repair", "resolh", "solcap", "store", "tower", "txsend", NULL };
 
 fd_metrics_sample_schema_t const fd_metrics_sample_link = { "link", 61U, fields_link, 9UL, 284UL };

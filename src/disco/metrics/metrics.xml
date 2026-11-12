@@ -2281,4 +2281,7 @@ deliberate exception with lint-allow="<rule id>")
 <tile name="solcap" telemetry="false">
 </tile>
 
+<tile name="geyser" telemetry="false">
+</tile>
+
 </metrics>

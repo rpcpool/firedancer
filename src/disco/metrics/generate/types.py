@@ -66,6 +66,7 @@ class Tile(Enum):
     VOTOR = 109
     MOTOR = 110
     SOLCAP = 111
+    GEYSER = 112
 
 class MetricType(Enum):
     COUNTER = 0
