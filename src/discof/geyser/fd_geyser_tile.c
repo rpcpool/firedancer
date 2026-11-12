@@ -104,10 +104,12 @@ struct geyser_sub {
 typedef struct geyser_sub geyser_sub_t;
 
 /* Per-in-link account reassembly state (one logical account at a time
-   per link). */
+   per link).  next_seq is the link sequence number of the fragment that
+   continues the account; any other one means fragments were lost. */
 struct geyser_reasm {
   int                  active;
   ulong                data_off;
+  ulong                next_seq;
   fd_geyser_acct_hdr_t hdr;
 };
 
@@ -143,6 +145,19 @@ struct fd_geyser_tile {
      reasm_pool + i*FD_GEYSER_ACCT_DATA_MAX). */
   geyser_reasm_t reasm[ GEYSER_MAX_IN_LINKS ];
   uchar *        reasm_pool;
+
+  /* The fragment being read.  Every in-link is unreliable, so
+     during_frag only copies out of the link and after_frag, which runs
+     only if the read was not overrun, applies it. */
+  struct {
+    int                  ok;       /* during_frag accepted the fragment */
+    int                  som;
+    int                  eom;
+    ulong                data_sz;  /* account data bytes copied to the reassembly buffer */
+    fd_geyser_acct_hdr_t hdr;      /* account header of a SOM fragment */
+    ulong                slot;     /* replay message */
+    ulong                parent_slot;
+  } frag;
 
   uchar   enc_buf[ GEYSER_ENC_BUF_SZ ];
   uchar * acct_enc_buf;
@@ -651,47 +666,109 @@ before_credit( fd_geyser_tile_t *  ctx,
 }
 
 static inline int
-returnable_frag( fd_geyser_tile_t *  ctx,
-                 ulong               in_idx,
-                 ulong               seq    FD_PARAM_UNUSED,
-                 ulong               sig,
-                 ulong               chunk,
-                 ulong               sz,
-                 ulong               ctl,
-                 ulong               tsorig FD_PARAM_UNUSED,
-                 ulong               tspub  FD_PARAM_UNUSED,
-                 fd_stem_context_t * stem ) {
-  (void)stem;
+before_frag( fd_geyser_tile_t * ctx,
+             ulong              in_idx,
+             ulong              seq FD_PARAM_UNUSED,
+             ulong              sig ) {
+  if( ctx->in_kind[ in_idx ]!=IN_KIND_REPLAY ) return 0;
+  return sig!=REPLAY_SIG_SLOT_COMPLETED && sig!=REPLAY_SIG_SLOT_DEAD &&
+         sig!=REPLAY_SIG_OC_ADVANCED    && sig!=REPLAY_SIG_ROOT_ADVANCED;
+}
 
+static inline void
+during_frag( fd_geyser_tile_t * ctx,
+             ulong              in_idx,
+             ulong              seq,
+             ulong              sig,
+             ulong              chunk,
+             ulong              sz,
+             ulong              ctl ) {
   if( FD_UNLIKELY( chunk<ctx->in[ in_idx ].chunk0 || chunk>ctx->in[ in_idx ].wmark || sz>ctx->in[ in_idx ].mtu ) ) {
     FD_LOG_ERR(( "chunk %lu %lu corrupt, not in range [%lu,%lu]", chunk, sz, ctx->in[ in_idx ].chunk0, ctx->in[ in_idx ].wmark ));
   }
 
-  if( ctx->in_kind[ in_idx ]==IN_KIND_ACCT ) {
-    ulong          hdr_sz = sizeof(fd_geyser_acct_hdr_t);
-    uchar const *  frag   = fd_chunk_to_laddr_const( ctx->in[ in_idx ].mem, chunk );
-    int            som    = fd_frag_meta_ctl_som( ctl );
-    int            eom    = fd_frag_meta_ctl_eom( ctl );
-    geyser_reasm_t * r    = &ctx->reasm[ in_idx ];
-    uchar *        buf    = ctx->reasm_pool + in_idx*FD_GEYSER_ACCT_DATA_MAX;
+  uchar const * frag = fd_chunk_to_laddr_const( ctx->in[ in_idx ].mem, chunk );
+  ctx->frag.ok = 0;
 
-    if( som ) {
-      r->active = 0;
-      if( FD_UNLIKELY( sz<hdr_sz ) ) return 0;
-      r->hdr = *(fd_geyser_acct_hdr_t const *)frag;
+  if( ctx->in_kind[ in_idx ]==IN_KIND_ACCT ) {
+    ulong            hdr_sz = sizeof(fd_geyser_acct_hdr_t);
+    geyser_reasm_t * r      = &ctx->reasm[ in_idx ];
+    uchar *          buf    = ctx->reasm_pool + in_idx*FD_GEYSER_ACCT_DATA_MAX;
+
+    ctx->frag.som = fd_frag_meta_ctl_som( ctl );
+    ctx->frag.eom = fd_frag_meta_ctl_eom( ctl );
+
+    if( ctx->frag.som ) {
+      if( FD_UNLIKELY( sz<hdr_sz ) ) return;
       ulong d = sz - hdr_sz;
-      if( FD_UNLIKELY( d>FD_GEYSER_ACCT_DATA_MAX ) ) return 0;
+      if( FD_UNLIKELY( d>FD_GEYSER_ACCT_DATA_MAX ) ) return;
+      fd_memcpy( &ctx->frag.hdr, frag, hdr_sz );
       fd_memcpy( buf, frag+hdr_sz, d );
-      r->data_off = d;
+      ctx->frag.data_sz = d;
+    } else {
+      if( FD_UNLIKELY( !r->active || seq!=r->next_seq ) ) return;           /* lost SOM or a fragment */
+      if( FD_UNLIKELY( r->data_off+sz>FD_GEYSER_ACCT_DATA_MAX ) ) return;
+      fd_memcpy( buf+r->data_off, frag, sz );
+      ctx->frag.data_sz = sz;
+    }
+    ctx->frag.ok = 1;
+    return;
+  }
+
+  switch( sig ) {
+    case REPLAY_SIG_SLOT_COMPLETED: {
+      fd_replay_slot_completed_t const * m = fd_type_pun_const( frag );
+      ctx->frag.slot        = m->slot;
+      ctx->frag.parent_slot = m->parent_slot;
+      break;
+    }
+    case REPLAY_SIG_SLOT_DEAD: {
+      fd_replay_slot_dead_t const * m = fd_type_pun_const( frag );
+      ctx->frag.slot = m->slot;
+      break;
+    }
+    case REPLAY_SIG_OC_ADVANCED: {
+      fd_replay_oc_advanced_t const * m = fd_type_pun_const( frag );
+      ctx->frag.slot = m->slot;
+      break;
+    }
+    case REPLAY_SIG_ROOT_ADVANCED: {
+      fd_replay_root_advanced_t const * m = fd_type_pun_const( frag );
+      ctx->frag.slot = m->slot;
+      break;
+    }
+    default:
+      return;
+  }
+  ctx->frag.ok = 1;
+}
+
+static inline void
+after_frag( fd_geyser_tile_t *  ctx,
+            ulong               in_idx,
+            ulong               seq,
+            ulong               sig,
+            ulong               sz     FD_PARAM_UNUSED,
+            ulong               tsorig FD_PARAM_UNUSED,
+            ulong               tspub  FD_PARAM_UNUSED,
+            fd_stem_context_t * stem   FD_PARAM_UNUSED ) {
+
+  if( ctx->in_kind[ in_idx ]==IN_KIND_ACCT ) {
+    geyser_reasm_t * r   = &ctx->reasm[ in_idx ];
+    uchar *          buf = ctx->reasm_pool + in_idx*FD_GEYSER_ACCT_DATA_MAX;
+
+    if( FD_UNLIKELY( !ctx->frag.ok ) ) { r->active = 0; return; }
+
+    if( ctx->frag.som ) {
+      r->hdr      = ctx->frag.hdr;
+      r->data_off = ctx->frag.data_sz;
       r->active   = 1;
     } else {
-      if( FD_UNLIKELY( !r->active ) ) return 0;                                   /* lost SOM (overrun) */
-      if( FD_UNLIKELY( r->data_off+sz>FD_GEYSER_ACCT_DATA_MAX ) ) { r->active=0; return 0; }
-      fd_memcpy( buf+r->data_off, frag, sz );
-      r->data_off += sz;
+      r->data_off += ctx->frag.data_sz;
     }
+    r->next_seq = fd_seq_inc( seq, 1UL );
 
-    if( eom && r->active ) {
+    if( ctx->frag.eom ) {
       if( FD_UNLIKELY( r->hdr.flags & FD_GEYSER_ACCT_FLAG_TRUNCATED ) ) {
         /* The producer capped the data; streaming a partial account as if
            complete would corrupt the consumer's view.  Drop it. */
@@ -699,20 +776,18 @@ returnable_frag( fd_geyser_tile_t *  ctx,
         FD_LOG_WARNING(( "geyser: dropping oversized account update for %s (data > %lu bytes)",
                          pubkey_b58, FD_GEYSER_ACCT_DATA_MAX ));
       } else if( FD_LIKELY( r->data_off==r->hdr.data_len ) ) {
-        /* Publish only if complete (an overrun-dropped fragment leaves
-           data_off short of data_len). */
         geyser_publish_account( ctx, &r->hdr, buf, r->data_off );
       }
       r->active = 0;
     }
-    return 0;
+    return;
   }
 
-  if( FD_UNLIKELY( ctx->in_kind[ in_idx ]!=IN_KIND_REPLAY ) ) return 0;
+  if( FD_UNLIKELY( !ctx->frag.ok ) ) return;
 
+  ulong slot = ctx->frag.slot;
   switch( sig ) {
     case REPLAY_SIG_SLOT_COMPLETED: {
-      fd_replay_slot_completed_t const * m = fd_chunk_to_laddr_const( ctx->in[ in_idx ].mem, chunk );
       /* Interslot statuses (FIRST_SHRED_RECEIVED / COMPLETED /
          CREATED_BANK) are emitted retroactively here: replay only
          reports them (as timestamps) once the slot finishes replaying,
@@ -720,34 +795,27 @@ returnable_frag( fd_geyser_tile_t *  ctx,
          PROCESSED.  Consumers relying on the status *sequence* (e.g.
          yellowstone-thorofare's completeness check) work; per-status
          arrival-latency comparisons for these three read as
-         processed-time.  Real-time emission needs a shred/repair-path
-         link, a later enhancement. */
-      geyser_publish_slot( ctx, m->slot, m->parent_slot, 1, GEYSER_SLOT_FIRST_SHRED,  1 );
-      geyser_publish_slot( ctx, m->slot, m->parent_slot, 1, GEYSER_SLOT_COMPLETED,    1 );
-      geyser_publish_slot( ctx, m->slot, m->parent_slot, 1, GEYSER_SLOT_CREATED_BANK, 1 );
-      geyser_publish_slot( ctx, m->slot, m->parent_slot, 1, GEYSER_SLOT_PROCESSED,    0 );
+         processed-time. */
+      ulong parent = ctx->frag.parent_slot;
+      geyser_publish_slot( ctx, slot, parent, 1, GEYSER_SLOT_FIRST_SHRED,  1 );
+      geyser_publish_slot( ctx, slot, parent, 1, GEYSER_SLOT_COMPLETED,    1 );
+      geyser_publish_slot( ctx, slot, parent, 1, GEYSER_SLOT_CREATED_BANK, 1 );
+      geyser_publish_slot( ctx, slot, parent, 1, GEYSER_SLOT_PROCESSED,    0 );
       break;
     }
-    case REPLAY_SIG_SLOT_DEAD: {
-      fd_replay_slot_dead_t const * m = fd_chunk_to_laddr_const( ctx->in[ in_idx ].mem, chunk );
-      geyser_publish_slot( ctx, m->slot, 0UL, 0, GEYSER_SLOT_DEAD, 0 );
+    case REPLAY_SIG_SLOT_DEAD:
+      geyser_publish_slot( ctx, slot, 0UL, 0, GEYSER_SLOT_DEAD, 0 );
       break;
-    }
-    case REPLAY_SIG_OC_ADVANCED: {
-      fd_replay_oc_advanced_t const * m = fd_chunk_to_laddr_const( ctx->in[ in_idx ].mem, chunk );
-      geyser_publish_slot( ctx, m->slot, 0UL, 0, GEYSER_SLOT_CONFIRMED, 0 );
+    case REPLAY_SIG_OC_ADVANCED:
+      geyser_publish_slot( ctx, slot, 0UL, 0, GEYSER_SLOT_CONFIRMED, 0 );
       break;
-    }
-    case REPLAY_SIG_ROOT_ADVANCED: {
-      fd_replay_root_advanced_t const * m = fd_chunk_to_laddr_const( ctx->in[ in_idx ].mem, chunk );
-      if( ctx->alpenglow ) geyser_publish_slot( ctx, m->slot, 0UL, 0, GEYSER_SLOT_CONFIRMED, 0 );
-      geyser_publish_slot( ctx, m->slot, 0UL, 0, GEYSER_SLOT_FINALIZED, 0 );
+    case REPLAY_SIG_ROOT_ADVANCED:
+      if( ctx->alpenglow ) geyser_publish_slot( ctx, slot, 0UL, 0, GEYSER_SLOT_CONFIRMED, 0 );
+      geyser_publish_slot( ctx, slot, 0UL, 0, GEYSER_SLOT_FINALIZED, 0 );
       break;
-    }
     default:
       break;
   }
-  return 0;
 }
 
 /* Init. ---------------------------------------------------------------*/
@@ -888,7 +956,9 @@ rlimit_file_cnt( fd_topo_t const *      topo FD_PARAM_UNUSED,
 #define STEM_CALLBACK_CONTEXT_ALIGN alignof(fd_geyser_tile_t)
 
 #define STEM_CALLBACK_BEFORE_CREDIT       before_credit
-#define STEM_CALLBACK_RETURNABLE_FRAG     returnable_frag
+#define STEM_CALLBACK_BEFORE_FRAG         before_frag
+#define STEM_CALLBACK_DURING_FRAG         during_frag
+#define STEM_CALLBACK_AFTER_FRAG          after_frag
 
 #include "../../disco/stem/fd_stem.c"
 
