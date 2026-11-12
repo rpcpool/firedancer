@@ -422,6 +422,25 @@ fd_runtime_commit_txn( fd_runtime_t *      runtime,
                        fd_txn_in_t const * txn_in,
                        fd_txn_out_t *      txn_out );
 
+/* fd_runtime_commit_txn_hold is fd_runtime_commit_txn without the final
+   account release.  On return, every account in txn_out->accounts that
+   the commit persists has its commit bit set and its final state, and
+   stays valid until fd_runtime_commit_txn_release. */
+
+void
+fd_runtime_commit_txn_hold( fd_runtime_t *      runtime,
+                            fd_bank_t *         bank,
+                            fd_txn_in_t const * txn_in,
+                            fd_txn_out_t *      txn_out );
+
+/* fd_runtime_commit_txn_release releases the accounts that
+   fd_runtime_commit_txn_hold left acquired.  Does nothing for a bundle
+   transaction, whose accounts fd_runtime_fini_bundle releases. */
+
+void
+fd_runtime_commit_txn_release( fd_runtime_t * runtime,
+                               fd_txn_out_t * txn_out );
+
 /* fd_runtime_cancel_txn cancels the result of a transaction execution
    and frees any resources that may have been acquired.  A transaction
    should only be canceled when the transaction is not committable.

@@ -1228,10 +1228,10 @@ fd_runtime_lthash_account( fd_runtime_t *      runtime,
    function should probably be moved to fd_executor.c. */
 
 void
-fd_runtime_commit_txn( fd_runtime_t *      runtime,
-                       fd_bank_t *         bank,
-                       fd_txn_in_t const * txn_in,
-                       fd_txn_out_t *      txn_out ) {
+fd_runtime_commit_txn_hold( fd_runtime_t *      runtime,
+                            fd_bank_t *         bank,
+                            fd_txn_in_t const * txn_in,
+                            fd_txn_out_t *      txn_out ) {
   FD_TEST( txn_out->err.is_committable );
 
   txn_out->details.commit_start_ticks = fd_tickcount();
@@ -1359,13 +1359,26 @@ fd_runtime_commit_txn( fd_runtime_t *      runtime,
   }
 
   if( FD_UNLIKELY( fd_bank_report_runtime_diffs( bank ) ) ) fd_event_runtime_txn_emit( txn_in, txn_out, bank );
+}
 
+void
+fd_runtime_commit_txn_release( fd_runtime_t * runtime,
+                               fd_txn_out_t * txn_out ) {
   if( FD_LIKELY( !txn_out->accounts.is_bundle ) ) {
     fd_accdb_release_ab( runtime->accdb,
                          txn_out->accounts.cnt, runtime->accounts.account,
                          runtime->accounts.executable_cnt, runtime->accounts.executable );
     runtime->accounts.executable_cnt = 0UL;
   }
+}
+
+void
+fd_runtime_commit_txn( fd_runtime_t *      runtime,
+                       fd_bank_t *         bank,
+                       fd_txn_in_t const * txn_in,
+                       fd_txn_out_t *      txn_out ) {
+  fd_runtime_commit_txn_hold( runtime, bank, txn_in, txn_out );
+  fd_runtime_commit_txn_release( runtime, txn_out );
 }
 
 void

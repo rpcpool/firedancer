@@ -11,6 +11,7 @@
 #include "../../flamenco/runtime/fd_executor.h"
 #include "../../flamenco/runtime/fd_cost_tracker.h"
 #include "../../flamenco/runtime/tests/fd_dump_pb.h"
+#include "../geyser/fd_geyser_acct.h"
 #include "../../flamenco/progcache/fd_progcache_user.h"
 #include "../../flamenco/log_collector/fd_log_collector_base.h"
 #include "../../disco/metrics/fd_metrics.h"
@@ -45,6 +46,10 @@ struct fd_execrp_tile {
   /* link-related data structures. */
   link_ctx_t            replay_in[ 1 ];
   link_ctx_t            execrp_replay_out[ 1 ]; /* TODO: Remove with solcap v2 */
+
+  /* Account updates to the geyser tile.  idx==ULONG_MAX if disabled. */
+  link_ctx_t            geyser_out[ 1 ];
+  ulong                 geyser_mtu;
 
   fd_sha512_t           sha_mem[ FD_TXN_SIG_MAX ];
   fd_sha512_t *         sha_lj[  FD_TXN_SIG_MAX ];
@@ -296,7 +301,16 @@ returnable_frag( fd_execrp_tile_t *  ctx,
         ctx->metrics.txn_version[ fd_execle_version_from_txn( TXN( ctx->txn_in.txn ) ) ]++;
 
         if( FD_LIKELY( ctx->txn_out.err.is_committable ) ) {
-          fd_runtime_commit_txn( ctx->runtime, ctx->bank, &ctx->txn_in, &ctx->txn_out );
+          if( FD_LIKELY( ctx->geyser_out->idx==ULONG_MAX ) ) {
+            fd_runtime_commit_txn( ctx->runtime, ctx->bank, &ctx->txn_in, &ctx->txn_out );
+          } else {
+            /* Publish committed accounts while they are still acquired. */
+            fd_runtime_commit_txn_hold( ctx->runtime, ctx->bank, &ctx->txn_in, &ctx->txn_out );
+            fd_geyser_acct_publish_txn( stem, ctx->geyser_out->idx, ctx->geyser_out->mem, &ctx->geyser_out->chunk,
+                                        ctx->geyser_out->chunk0, ctx->geyser_out->wmark, ctx->geyser_mtu,
+                                        &ctx->txn_out, ctx->bank->f.slot );
+            fd_runtime_commit_txn_release( ctx->runtime, &ctx->txn_out );
+          }
         } else {
           fd_runtime_cancel_txn( ctx->runtime, ctx->bank, &ctx->txn_in, &ctx->txn_out );
         }
@@ -455,6 +469,17 @@ unprivileged_init( fd_topo_t const *      topo,
     ctx->execrp_replay_out->chunk0 = fd_dcache_compact_chunk0( ctx->execrp_replay_out->mem, execrp_replay_link->dcache );
     ctx->execrp_replay_out->wmark  = fd_dcache_compact_wmark( ctx->execrp_replay_out->mem, execrp_replay_link->dcache, execrp_replay_link->mtu );
     ctx->execrp_replay_out->chunk  = ctx->execrp_replay_out->chunk0;
+  }
+
+  ctx->geyser_out->idx = fd_topo_find_tile_out_link( topo, tile, "execrp_geyser", ctx->tile_idx );
+  ctx->geyser_mtu      = 0UL;
+  if( FD_UNLIKELY( ctx->geyser_out->idx!=ULONG_MAX ) ) {
+    fd_topo_link_t const * geyser_link = &topo->links[ tile->out_link_id[ ctx->geyser_out->idx ] ];
+    ctx->geyser_out->mem    = topo->workspaces[ topo->objs[ geyser_link->dcache_obj_id ].wksp_id ].wksp;
+    ctx->geyser_out->chunk0 = fd_dcache_compact_chunk0( ctx->geyser_out->mem, geyser_link->dcache );
+    ctx->geyser_out->wmark  = fd_dcache_compact_wmark( ctx->geyser_out->mem, geyser_link->dcache, geyser_link->mtu );
+    ctx->geyser_out->chunk  = ctx->geyser_out->chunk0;
+    ctx->geyser_mtu         = geyser_link->mtu;
   }
 
   ctx->capture_ctx = NULL;

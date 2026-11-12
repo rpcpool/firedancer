@@ -25,7 +25,7 @@
 #include "../../disco/stem/fd_stem.h"
 #include "../../disco/fd_disco_base.h"
 #include "../../tango/fd_tango_base.h"
-#include "../../flamenco/runtime/fd_runtime_const.h"
+#include "../../flamenco/runtime/fd_runtime.h"
 
 #define FD_GEYSER_ACCT_FLAG_HAS_SIG    (1U)
 #define FD_GEYSER_ACCT_FLAG_TRUNCATED  (2U)
@@ -111,6 +111,42 @@ fd_geyser_acct_publish( fd_stem_context_t * stem,
     int eom = ( off==stream_len );
     fd_stem_publish( stem, out_idx, 0UL, *pchunk, chunk_sz, fd_frag_meta_ctl( 0UL, 0, eom, 0 ), 0UL, 0UL );
     *pchunk = fd_dcache_compact_next( *pchunk, chunk_sz, chunk0, wmark );
+  }
+}
+
+/* fd_geyser_acct_publish_txn publishes every account that the commit of
+   txn_out persists.  That set is the writable accounts this txn owns
+   with the accdb commit bit set: touched accounts of a successful txn,
+   or the rolled back fee payer and nonce account of a failed one.
+
+   Call it between fd_runtime_commit_txn_hold and
+   fd_runtime_commit_txn_release (or before fd_runtime_fini_bundle for a
+   bundle): the account data buffers return to the accdb cache on
+   release.
+
+   This can publish many fragments from one stem callback.  The *_geyser
+   links have no reliable consumer, so fd_stem_publish takes no flow
+   control credits for them and STEM_BURST is unaffected. */
+
+static inline void
+fd_geyser_acct_publish_txn( fd_stem_context_t *  stem,
+                            ulong                out_idx,
+                            fd_wksp_t *          mem,
+                            ulong *              pchunk,
+                            ulong                chunk0,
+                            ulong                wmark,
+                            ulong                mtu,
+                            fd_txn_out_t const * txn_out,
+                            ulong                slot ) {
+  if( FD_UNLIKELY( !txn_out->err.is_committable ) ) return; /* cost tracker rejected it: the block is dead */
+  uchar const * sig = txn_out->details.signature.uc;
+  for( ulong i=0UL; i<txn_out->accounts.cnt; i++ ) {
+    if( !txn_out->accounts.is_writable[ i ] || !txn_out->accounts.account_acquired[ i ] ) continue;
+    fd_acc_t const * a = txn_out->accounts.account[ i ];
+    if( FD_UNLIKELY( !a || !a->commit ) ) continue;
+    fd_geyser_acct_publish( stem, out_idx, mem, pchunk, chunk0, wmark, mtu,
+                            txn_out->accounts.keys[ i ].uc, a->owner, a->lamports, a->executable,
+                            a->data, a->data_len, slot, sig, 1 );
   }
 }
 

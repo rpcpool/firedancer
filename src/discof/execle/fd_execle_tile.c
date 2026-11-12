@@ -12,6 +12,7 @@
 #include "../../disco/metrics/generated/fd_metrics_enums.h"
 #include "../../discof/fd_startup.h"
 #include "../../flamenco/runtime/fd_runtime.h"
+#include "../geyser/fd_geyser_acct.h"
 #include "../../flamenco/runtime/fd_bank.h"
 #include "../../flamenco/progcache/fd_progcache_user.h"
 #include "../../flamenco/log_collector/fd_log_collector_base.h"
@@ -57,6 +58,10 @@ struct fd_execle_tile {
 
   fd_execle_out_t out_poh[1];
   fd_execle_out_t out_pack[1];
+
+  /* Account updates to the geyser tile.  idx==ULONG_MAX if disabled. */
+  fd_execle_out_t out_geyser[1];
+  ulong           geyser_mtu;
 
   ulong                rebates_for_slot;
   ulong                rebate_tsorig;
@@ -400,7 +405,16 @@ handle_microblock( fd_execle_tile_t *  ctx,
        if that happens.  We cannot reject the transaction here as there
        would be no way to undo the partially applied changes to the bank
        in finalize anyway. */
-    fd_runtime_commit_txn( ctx->runtime, bank, txn_in, txn_out );
+    if( FD_LIKELY( ctx->out_geyser->idx==ULONG_MAX ) ) {
+      fd_runtime_commit_txn( ctx->runtime, bank, txn_in, txn_out );
+    } else {
+      /* Publish committed accounts while they are still acquired. */
+      fd_runtime_commit_txn_hold( ctx->runtime, bank, txn_in, txn_out );
+      fd_geyser_acct_publish_txn( stem, ctx->out_geyser->idx, ctx->out_geyser->mem, &ctx->out_geyser->chunk,
+                                  ctx->out_geyser->chunk0, ctx->out_geyser->wmark, ctx->geyser_mtu,
+                                  txn_out, bank->f.slot );
+      fd_runtime_commit_txn_release( ctx->runtime, txn_out );
+    }
 
     long const txn_end_ticks = fd_tickcount();
     last_ticks = txn_end_ticks;
@@ -576,6 +590,14 @@ handle_bundle( fd_execle_tile_t *  ctx,
       uchar *        signature = (uchar *)txn_in->txn->payload + TXN( txn_in->txn )->signature_off;
 
       fd_runtime_commit_txn( ctx->runtime, bank, txn_in, txn_out );
+
+      /* Bundle accounts stay acquired until fd_runtime_fini_bundle.  An
+         account is published once, by the last txn that writes it. */
+      if( FD_UNLIKELY( ctx->out_geyser->idx!=ULONG_MAX ) ) {
+        fd_geyser_acct_publish_txn( stem, ctx->out_geyser->idx, ctx->out_geyser->mem, &ctx->out_geyser->chunk,
+                                    ctx->out_geyser->chunk0, ctx->out_geyser->wmark, ctx->geyser_mtu,
+                                    txn_out, bank->f.slot );
+      }
 
       txn_end_ticks[ i ] = fd_tickcount();
 
@@ -851,6 +873,10 @@ unprivileged_init( fd_topo_t const *      topo,
 
   *ctx->out_poh = out1( topo, tile, "execle_poh" ); FD_TEST( ctx->out_poh->idx!=ULONG_MAX );
   *ctx->out_pack = out1( topo, tile, "execle_pack" );
+
+  *ctx->out_geyser = out1( topo, tile, "execle_geyser" );
+  ctx->geyser_mtu  = 0UL;
+  if( FD_UNLIKELY( ctx->out_geyser->idx!=ULONG_MAX ) ) ctx->geyser_mtu = topo->links[ tile->out_link_id[ ctx->out_geyser->idx ] ].mtu;
 
   ctx->enable_rebates = ctx->out_pack->idx!=ULONG_MAX;
 
